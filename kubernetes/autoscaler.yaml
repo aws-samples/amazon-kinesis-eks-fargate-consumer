@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: autoscaler
+  namespace: kcl-processor
+spec:
+  serviceAccountName: kcl-autoscaler-sa
+  containers:
+    - name: autoscaler
+      image: <AUTOSCALER_ECR_REPOSITORY_URI>:latest
+      env:
+      - name: REGION
+        value: "us-west-2"
+      - name: STREAM_NAME
+        value: "kcl-processing-stream"
+      - name: APPLICATION_NAME
+        value: "EKSFargateKinesisAutoscaler"
+      - name: CONFIG_FILE
+        value: "/config/configuration-us-west-2.json"
+      - name: ENABLE_IRP
+        value: "true"
+      resources: {}
