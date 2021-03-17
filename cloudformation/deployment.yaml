@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create non-Java Kinesis consumer and autoscaler docker images + setup IAM policies for EKS Fargate
+
+
+Resources:
+
+  KinesisDataStream01:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: kcl-processing-stream
+      ShardCount: 1
+    DependsOn: CodeBuildTriggerRule01
+
+  ConsumerRepository01:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: kcl/consumer
+
+  KCLPolicy01:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: CustomEKSFargateKCLPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - kinesis:DescribeStream
+          - kinesis:PutRecord
+          - kinesis:PutRecords
+          - kinesis:GetShardIterator
+          - kinesis:GetRecords
+          - kinesis:ListShards
+          - kinesis:DescribeStreamSummary
+          - kinesis:RegisterStreamConsumer
+          Resource:
+          - !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/kcl-processing-stream'
+        - Effect: Allow
+          Action:
+          - kinesis:DescribeStreamConsumer
+          - kinesis:SubscribeToShard
+          Resource:
+            - !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/kcl-processing-stream/*'
+        - Effect: Allow
+          Action:
+          - dynamodb:PutItem
+          - dynamodb:DeleteItem
+          - dynamodb:Scan
+          - dynamodb:UpdateItem
+          - dynamodb:DeleteTable
+          - dynamodb:CreateTable
+          - dynamodb:DescribeTable
+          - dynamodb:GetItem
+          - dynamodb:UpdateTable
+          - dynamodb:GetRecords
+          Resource:
+          - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/EKSFargateKinesisConsumer'
+        - Effect: Allow
+          Action:
+          - cloudwatch:PutMetricData
+          Resource: '*'
+
+  KinesisAutoscalerRepository01:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: kcl/kinesisautoscaler
+
+  KinesisAutoscalerPolicy01:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: CustomEKSFargateKinesisAutoscalerPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+            - kinesis:DescribeStreamSummary
+            - kinesis:UpdateShardCount
+            - kinesis:ListShards
+            - kinesis:SplitShard
+            - kinesis:MergeShards
+            Resource:
+              - !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/kcl-processing-stream'
+          - Effect: Allow
+            Action:
+            - kinesis:DescribeStreamConsumer
+            - kinesis:SubscribeToShard
+            Resource:
+              - !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/kcl-processing-stream/*'
+          - Effect: "Allow"
+            Action:
+            - cloudwatch:PutMetricData
+            - cloudwatch:GetMetricStatistics
+            Resource: '*'
+
+  EventBridgeRole01:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+
+  EventBridgePolicy01:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: KCL-ImageBuild-EventBridge-Policy
+      Roles:
+      - !Ref EventBridgeRole01
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Action:
+            - codebuild:StartBuild
+            Resource:
+            - !GetAtt CodeBuildProjectDockerImages01.Arn
+
+  CodeBuildTriggerRule01:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger Docker Image Build in CodeBuild
+      EventPattern:
+        source:
+        - aws.kinesis
+        detail-type:
+        - "AWS API Call via CloudTrail"
+        detail:
+          eventSource:
+          - kinesis.amazonaws.com
+          eventName:
+          - CreateStream
+      RoleArn: !GetAtt EventBridgeRole01.Arn
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CodeBuildProjectDockerImages01.Arn
+          Id: CodeBuildDockerImages
+          RoleArn: !GetAtt EventBridgeRole01.Arn
+
+  CodeBuildRole01:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+
+  CodeBuildPolicy01:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: KCL-ImageBuild-Policy
+      Roles:
+      - !Ref CodeBuildRole01
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Action:
+            - ecr:BatchCheckLayerAvailability
+            - ecr:CompleteLayerUpload
+            - ecr:InitiateLayerUpload
+            - ecr:PutImage
+            - ecr:UploadLayerPart
+            Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/kcl/*'
+          -
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+            Resource: '*'
+          -
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+          -
+            Effect: Allow
+            Action:
+            - codebuild:CreateReportGroup
+            - codebuild:CreateReport
+            - codebuild:UpdateReport
+            - codebuild:BatchPutTestCases
+            Resource: !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*'
+          -
+            Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+
+
+  CodeBuildProjectDockerImages01:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: KCL-ImageBuild-All
+      Description: Build Docker images for Consumer & Kinesis Autoscaling Application
+      ServiceRole: !Ref CodeBuildRole01
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+        - Name: AWS_ACCOUNT_ID
+          Value: !Ref 'AWS::AccountId'
+        - Name: IMAGE_REPO_NAME_CONSUMER
+          Value: kcl/consumer
+        - Name: IMAGE_REPO_NAME_AUTOSCALER
+          Value: kcl/kinesisautoscaler
+        - Name: IMAGE_TAG
+          Value: latest
+        - Name: AWS_DEFAULT_REGION
+          Value: !Ref 'AWS::Region'
+        - Name: SOURCE_REPO
+          Value: https://github.com/aws-samples/kinesis-eks-fargate-consumer
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: '{    "version": 0.2,    "env": {        "git-credential-helper": "yes"    },    "phases": {        "pre_build": {            "commands": [                "echo Fetching repo...",                "git clone --single-branch --branch master $SOURCE_REPO .",                "echo Logging in to Amazon ECR...",                "$(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)"            ]        },        "build": {            "commands": [                "echo Build started on `date`",                "echo Building the Docker image...",                "docker build -t $IMAGE_REPO_NAME_CONSUMER:$IMAGE_TAG --build-arg AWS_REGION=$AWS_DEFAULT_REGION ./consumer ",                "docker tag $IMAGE_REPO_NAME_CONSUMER:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME_CONSUMER:$IMAGE_TAG",                "docker build -t $IMAGE_REPO_NAME_AUTOSCALER:$IMAGE_TAG ./kinesisautoscaler",                "docker tag $IMAGE_REPO_NAME_AUTOSCALER:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME_AUTOSCALER:$IMAGE_TAG"            ]        },        "post_build": {            "commands": [                "echo Build completed on `date`",                "echo Pushing the Docker image...",                "docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME_CONSUMER:$IMAGE_TAG",                "docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME_AUTOSCALER:$IMAGE_TAG"            ]        }    }}'
+      TimeoutInMinutes: 10
+
+
+Outputs:
+  KINESIS_DATA_STREAM_NAME:
+    Description: The name of Kinesis data stream
+    Value: !Ref KinesisDataStream01
+  CONSUMER_ECR_REPOSITORY_URI:
+    Description: The name of kinesis client library repository
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/kcl/consumer"
+  AUTOSCALER_ECR_REPOSITORY_URI:
+    Description: The name of kinesis autoscaler repository
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/kcl/kinesisautoscaler"
+  KCL_POLICY_ARN:
+    Description: ARN of KCL policy
+    Value: !Ref KCLPolicy01
+  KINESIS_AUTOSCALER_POLICY_ARN:
+    Description: ARN of Kinesis Autoscaler policy
+    Value: !Ref KinesisAutoscalerPolicy01

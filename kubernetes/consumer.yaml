@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+  namespace: kcl-processor
+  labels:
+    app: consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: consumer
+    spec:
+      serviceAccountName: kcl-consumer-sa
+      containers:
+      - name: consumer
+        image: <CONSUMER_ECR_REPOSITORY_URI>:latest
+        env:
+        - name: REGION
+          value: "us-west-2"
+        - name: STREAM_NAME
+          value: "kcl-processing-stream"
+        - name: APPLICATION_NAME
+          value: "EKSFargateKinesisConsumer"
+        - name: ENABLE_IRP
+          value: "true"
+        resources: {}
